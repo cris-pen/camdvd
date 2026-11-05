@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    name: Tests on Linux (simulated drive)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Build
+        run: make
+      - name: Test
+        run: tests/run_tests.sh
+
+  macos:
+    name: Build and test on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+      - name: Build with the IOKit drive backend
+        run: make
+      - name: Build for Apple Silicon and Intel
+        run: |
+          for arch in arm64 x86_64; do
+            clang -arch "$arch" -mmacosx-version-min=11.0 -O2 -Wall -Wextra -Werror -std=c11 -D_DARWIN_C_SOURCE \
+              src/main.c src/transport_sim.c src/transport_macos.c \
+              -framework IOKit -framework CoreFoundation -o "/tmp/camdvd-$arch"
+            file "/tmp/camdvd-$arch"
+          done
+      - name: Test
+        run: tests/run_tests.sh

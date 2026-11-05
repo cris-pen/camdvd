@@ -1,0 +1,128 @@
+#!/bin/bash
+# camdvd-rescue: rip one camcorder DVD (or a stack of them) and rebuild the scenes.
+#
+#   ./camdvd-rescue                       rip the disc in the drive
+#   ./camdvd-rescue birthday-2006         same, with a name (rerun the same name to resume)
+#   ./camdvd-rescue --batch xmas          one disc after another: xmas-01, xmas-02, ...
+#   ./camdvd-rescue --formats mpg,prores  also make ProRes 422 HQ files for editing
+#
+# Options:
+#   --formats LIST   mpg (lossless, default), prores (editing), mp4 (sharing). Comma separated.
+#   --out DIR        where disc folders go (default ~/Movies/DVD Rescue)
+#   --drive N        drive index or name from 'bin/camdvd list' (default 0)
+#   --retries N      attempts per damaged sector (default 4)
+#   --batch          keep going: eject, wait for the next disc, repeat
+#   --no-eject       leave the disc in the drive
+#   --extract-only   skip ripping; rebuild the scenes from an existing image (needs NAME)
+#   --join           also write the whole disc as one file
+#   --split MODE     scenes (default), cells (also split at DVD cells), pieces (every burst)
+#   --retry-bad, --probe, --range A-B   passed to 'camdvd rip' (see README)
+set -u
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+BIN="$HERE/bin/camdvd"
+OUT_ROOT="$HOME/Movies/DVD Rescue"
+DRIVE=0
+FORMATS=mpg
+BATCH=0
+EJECT=1
+RETRIES=4
+NAME=""
+EXTRACT_ONLY=0
+RIP_EXTRA=()
+EXTRACT_EXTRA=()
+
+die() { echo "camdvd-rescue: $*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --formats) FORMATS="${2:?}"; shift ;;
+    --out) OUT_ROOT="${2:?}"; shift ;;
+    --drive|-d) DRIVE="${2:?}"; shift ;;
+    --retries) RETRIES="${2:?}"; shift ;;
+    --batch) BATCH=1 ;;
+    --no-eject) EJECT=0 ;;
+    --extract-only) EXTRACT_ONLY=1 ;;
+    --join) EXTRACT_EXTRA+=(--join) ;;
+    --split) EXTRACT_EXTRA+=(--split "${2:?}"); shift ;;
+    --retry-bad|--probe|--force|--no-scrape) RIP_EXTRA+=("$1") ;;
+    --range) RIP_EXTRA+=("$1" "${2:?}"); shift ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) die "unknown option $1 (see --help)" ;;
+    *) NAME="$1" ;;
+  esac
+  shift
+done
+
+# macOS blocks the drive user client for tools living in privacy-protected folders.
+case "$HERE" in
+  "$HOME/Desktop"*|"$HOME/Documents"*|"$HOME/Downloads"*|*"/Mobile Documents/"*|*"/CloudStorage/"*)
+    die "move this folder out of Desktop/Documents/Downloads/iCloud first, e.g.:
+    mv \"$HERE\" ~/camdvd && cd ~/camdvd && ./camdvd-rescue" ;;
+esac
+
+# Build the drive tool on first run (and after any source change).
+if [ ! -x "$BIN" ] || [ -n "$(find "$HERE/src" -newer "$BIN" -print 2>/dev/null | head -1)" ]; then
+  xcrun --find clang >/dev/null 2>&1 || die "the Xcode command line tools are needed to build camdvd. Run:  xcode-select --install"
+  echo "Building camdvd..."
+  make -s -C "$HERE" || die "build failed"
+fi
+command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg is needed. Install it with:  brew install ffmpeg"
+command -v python3 >/dev/null 2>&1 || die "python3 is needed (it comes with the Xcode command line tools)"
+
+rescue_one() {
+  local name="$1" dir="$OUT_ROOT/$1" rc
+  mkdir -p "$dir" || die "cannot create $dir"
+  echo
+  echo "=== $name  ->  $dir"
+
+  if [ $EXTRACT_ONLY -eq 0 ]; then
+    "$BIN" info -d "$DRIVE" | tee "$dir/disc-info.txt"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "Could not read the disc information (see above)."; return 1; }
+    echo
+    "$BIN" rip -d "$DRIVE" -o "$dir/disc.img" --retries "$RETRIES" ${RIP_EXTRA[@]+"${RIP_EXTRA[@]}"} </dev/null
+    rc=$?
+    case $rc in
+      0) ;;
+      2) echo "Continuing with what was read. To try the damaged spots again later (another drive, or after cleaning the disc):"
+         echo "    ./camdvd-rescue \"$name\" --retry-bad" ;;
+      3) echo "Rerun to resume:  ./camdvd-rescue \"$name\""; return 3 ;;
+      130) echo "Rerun to resume:  ./camdvd-rescue \"$name\""; exit 130 ;;
+      *) return 1 ;;
+    esac
+  fi
+
+  [ -f "$dir/disc.img" ] || { echo "No image at $dir/disc.img"; return 1; }
+  echo
+  python3 "$HERE/extract.py" "$dir/disc.img" -o "$dir/scenes" --format "$FORMATS" ${EXTRACT_EXTRA[@]+"${EXTRACT_EXTRA[@]}"} </dev/null
+  rc=$?
+  if [ $EXTRACT_ONLY -eq 0 ] && [ $EJECT -eq 1 ]; then "$BIN" eject -d "$DRIVE" >/dev/null 2>&1; fi
+  [ $rc -eq 0 ] && echo "Done: $dir/scenes"
+  return $rc
+}
+
+if [ $EXTRACT_ONLY -eq 1 ]; then
+  [ -n "$NAME" ] || die "--extract-only needs the disc name"
+  rescue_one "$NAME"; exit $?
+fi
+
+if [ $BATCH -eq 0 ]; then
+  [ -n "$NAME" ] || NAME="disc-$(date +%Y%m%d-%H%M%S)"
+  rescue_one "$NAME"; rc=$?
+  [ $rc -eq 0 ] && open "$OUT_ROOT/$NAME/scenes" 2>/dev/null
+  exit $rc
+fi
+
+prefix="${NAME:-disc-$(date +%Y%m%d)}"
+n=1
+while :; do
+  # skip discs that an earlier batch run already finished
+  while [ -f "$OUT_ROOT/$(printf '%s-%02d' "$prefix" $n)/scenes/scenes.txt" ]; do n=$((n+1)); done
+  name=$(printf '%s-%02d' "$prefix" $n)
+  printf "\nInsert disc for %s and press Return (q to quit): " "$name"
+  read -r answer || break
+  [ "$answer" = "q" ] && break
+  rescue_one "$name"
+  n=$((n+1))
+done
+open "$OUT_ROOT" 2>/dev/null
