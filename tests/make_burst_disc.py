@@ -29,7 +29,7 @@ def encode(name, seconds, freq):
         subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
                         "-f", "lavfi", "-i", "testsrc2=size=720x480:rate=30000/1001:duration=%d" % seconds,
                         "-f", "lavfi", "-i", "sine=frequency=%d:duration=%d" % (freq, seconds),
-                        "-target", "ntsc-dvd", "-flags", "+ilme+ildct", "-top", "1", path], check=True)
+                        "-vf", "setfield=tff", "-target", "ntsc-dvd", "-flags", "+ilme+ildct", path], check=True)
     return open(path, "rb").read()
 
 

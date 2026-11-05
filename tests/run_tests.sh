@@ -16,7 +16,7 @@ if [ ! -f $FX/clip3.mpg ]; then
   mkdir -p $FX
   for i in 1 2 3; do
     ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc2=size=720x480:rate=30000/1001:duration=6" \
-      -f lavfi -i "sine=frequency=$((300*i)):duration=6" -target ntsc-dvd -flags +ilme+ildct -top 1 $FX/clip$i.mpg
+      -f lavfi -i "sine=frequency=$((300*i)):duration=6" -vf setfield=tff -target ntsc-dvd -flags +ilme+ildct $FX/clip$i.mpg
   done
 fi
 
